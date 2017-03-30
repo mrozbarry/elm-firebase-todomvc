@@ -1,4 +1,4 @@
-port module Todo exposing (..)
+module Todo exposing (..)
 
 {-| TodoMVC implemented in Elm, using plain HTML and CSS for rendering.
 
@@ -16,82 +16,102 @@ import Dom
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
-import Html.Keyed as Keyed
-import Html.Lazy exposing (lazy, lazy2)
-import Json.Decode as Json
+import Html.Keyed
+import Html.Lazy exposing (lazy, lazy2, lazy3)
+import Json.Decode
+import Json.Encode
 import String
-import Task
+import Task exposing (Task)
 
 
-main : Program (Maybe Model) Model Msg
+-- Firebase modules
+
+import Firebase
+import Firebase.Errors exposing (Error)
+import Firebase.Database
+import Firebase.Database.Reference
+import Firebase.Database.Snapshot
+import Firebase.Database.Types exposing (Database, Reference, Snapshot)
+import Firebase.Authentication
+import Firebase.Authentication.Types exposing (Auth, User)
+
+
+main : Program FirebaseConfig Model Msg
 main =
     Html.programWithFlags
         { init = init
         , view = view
-        , update = updateWithStorage
-        , subscriptions = \_ -> Sub.none
+        , update = update
+        , subscriptions =
+            \model ->
+                let
+                    todoRef : Reference
+                    todoRef =
+                        model.app
+                            |> Firebase.Database.init
+                            |> Firebase.Database.ref (Just "todo")
+                in
+                    Sub.batch [ Firebase.Database.Reference.on "value" todoRef GetEntries ]
         }
-
-
-port setStorage : Model -> Cmd msg
-
-
-{-| We want to `setStorage` on every update. This function adds the setStorage
-command for every step of the update function.
--}
-updateWithStorage : Msg -> Model -> ( Model, Cmd Msg )
-updateWithStorage msg model =
-    let
-        ( newModel, cmds ) =
-            update msg model
-    in
-        ( newModel
-        , Cmd.batch [ setStorage newModel, cmds ]
-        )
 
 
 
 -- MODEL
-
-
 -- The full application state of our todo app.
+
+
 type alias Model =
-    { entries : List Entry
-    , field : String
-    , uid : Int
+    { app : Firebase.App
+    , entries : List Entry
+    , newTodoDescription : String
+    , editingEntryId : Maybe String
     , visibility : String
+    , signedIn : Bool
+    }
+
+
+type alias FirebaseConfig =
+    { apiKey : String
+    , authDomain : String
+    , databaseURL : String
+    , storageBucket : String
+    , messagingSenderId : String
     }
 
 
 type alias Entry =
-    { description : String
+    { id : String
+    , description : String
     , completed : Bool
-    , editing : Bool
-    , id : Int
     }
 
 
-emptyModel : Model
-emptyModel =
-    { entries = []
+initialModel : Firebase.App -> Model
+initialModel app =
+    { app = app
+    , entries = []
+    , newTodoDescription = ""
+    , editingEntryId = Nothing
     , visibility = "All"
-    , field = ""
-    , uid = 0
+    , signedIn = False
     }
 
 
-newEntry : String -> Int -> Entry
-newEntry desc id =
-    { description = desc
-    , completed = False
-    , editing = False
-    , id = id
-    }
+init : FirebaseConfig -> ( Model, Cmd Msg )
+init config =
+    let
+        app : Firebase.App
+        app =
+            Firebase.init config
 
-
-init : Maybe Model -> ( Model, Cmd Msg )
-init savedModel =
-    Maybe.withDefault emptyModel savedModel ! []
+        auth : Auth
+        auth =
+            app
+                |> Firebase.Authentication.init
+    in
+        ( initialModel app
+        , Task.attempt FirebaseAuthResult (Firebase.Authentication.signInAnonymously auth)
+        )
 
 
 
@@ -103,97 +123,242 @@ messages are fed into the `update` function as they occur, letting us react
 to them.
 -}
 type Msg
-    = NoOp
+    = GetEntries Snapshot
     | UpdateField String
-    | EditingEntry Int Bool
-    | UpdateEntry Int String
+    | EditingEntry (Maybe String)
+    | UpdateEntry String String
     | Add
-    | Delete Int
+    | Delete String
     | DeleteComplete
-    | Check Int Bool
+    | Check String Bool
     | CheckAll Bool
     | ChangeVisibility String
+    | FirebaseResult (Result Error ())
+    | FirebaseAuthResult (Result Error User)
+    | NoOp
 
 
 
 -- How we update our Model on a given Msg?
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    case msg of
-        NoOp ->
-            model ! []
+    let
+        rootRef : Reference
+        rootRef =
+            model.app
+                |> Firebase.Database.init
+                |> Firebase.Database.ref (Just "todo")
+    in
+        case msg of
+            GetEntries snapshot ->
+                let
+                    entriesResult : Result String (List Entry)
+                    entriesResult =
+                        snapshot
+                            |> Firebase.Database.Snapshot.value
+                            |> Json.Decode.decodeValue decodeEntries
 
-        Add ->
-            { model
-                | uid = model.uid + 1
-                , field = ""
-                , entries =
-                    if String.isEmpty model.field then
+                    decodeEntries : Json.Decode.Decoder (List Entry)
+                    decodeEntries =
+                        Json.Decode.map
+                            toEntryList
+                            (Json.Decode.maybe (Json.Decode.keyValuePairs decodeEntry))
+
+                    toEntryList : Maybe (List ( String, Entry )) -> List Entry
+                    toEntryList maybeKeyValueEntries =
+                        case maybeKeyValueEntries of
+                            Just keyValueEntries ->
+                                List.map
+                                    (\( id, entry ) -> { entry | id = id })
+                                    keyValueEntries
+                            Nothing ->
+                                []
+
+                    decodeEntry : Json.Decode.Decoder Entry
+                    decodeEntry =
+                        Json.Decode.map2
+                            (Entry "")
+                            (Json.Decode.field "description" Json.Decode.string)
+                            (Json.Decode.field "completed" Json.Decode.bool)
+                in
+                    case entriesResult of
+                        Ok entries ->
+                            ( { model | entries = entries }
+                            , Cmd.none
+                            )
+                        Err decodeMessage ->
+                            let
+                                _ =
+                                    Debug.log "Unable to decode todo list" decodeMessage
+                            in
+                                ( model
+                                , Cmd.none
+                                )
+
+            UpdateField str ->
+                ( { model | newTodoDescription = str }
+                , Cmd.none
+                )
+
+            EditingEntry maybeId ->
+                let
+                    focusCmd : Cmd Msg
+                    focusCmd =
+                        case maybeId of
+                            Just id ->
+                                Task.attempt (\_ -> NoOp) (Dom.focus ("todo-" ++ id))
+
+                            Nothing ->
+                                Cmd.none
+                in
+                    ( { model | editingEntryId = maybeId }
+                    , Cmd.batch [ focusCmd ]
+                    )
+
+            UpdateEntry id description ->
+                let
+                    writeUpdate : Task Error ()
+                    writeUpdate =
+                        rootRef
+                            |> Firebase.Database.Reference.child id
+                            |> Firebase.Database.Reference.child "description"
+                            |> Firebase.Database.Reference.set (Json.Encode.string description)
+                in
+                    ( model
+                    , Cmd.batch [ Task.attempt FirebaseResult writeUpdate ]
+                    )
+
+            Add ->
+                let
+                    writeTodo : Task Error ()
+                    writeTodo =
+                        ref
+                            |> Firebase.Database.Reference.set encodeTodo
+
+                    ref : Reference
+                    ref =
+                        Firebase.Database.Reference.push rootRef
+
+                    encodeTodo : Json.Encode.Value
+                    encodeTodo =
+                        Json.Encode.object
+                            [ ( "description", Json.Encode.string model.newTodoDescription )
+                            , ( "completed", Json.Encode.bool False )
+                            ]
+                in
+                    ( { model | newTodoDescription = "" }
+                    , Cmd.batch [ Task.attempt FirebaseResult writeTodo ]
+                    )
+
+            Delete id ->
+                let
+                    removeTodo : Task Error ()
+                    removeTodo =
+                        rootRef
+                            |> Firebase.Database.Reference.child id
+                            |> Firebase.Database.Reference.set (Json.Encode.null)
+                in
+                    ( model
+                    , Cmd.batch [ Task.attempt FirebaseResult removeTodo ]
+                    )
+
+            DeleteComplete ->
+                let
+                    removeCompleted : Task Error ()
+                    removeCompleted =
+                        rootRef
+                            |> Firebase.Database.Reference.update setCompletedTodosToNull
+
+                    setCompletedTodosToNull : Json.Encode.Value
+                    setCompletedTodosToNull =
+                        Json.Encode.object
+                            (List.map (\todo -> ( todo.id, Json.Encode.null )) allCompletedTodos)
+
+                    allCompletedTodos : List Entry
+                    allCompletedTodos =
                         model.entries
-                    else
-                        model.entries ++ [ newEntry model.field model.uid ]
-            }
-                ! []
+                            |> List.filter (\entry -> entry.completed == True)
+                in
+                    ( model
+                    , Cmd.batch [ Task.attempt FirebaseResult removeCompleted ]
+                    )
 
-        UpdateField str ->
-            { model | field = str }
-                ! []
+            Check id isCompleted ->
+                let
+                    setComplete : Task Error ()
+                    setComplete =
+                        rootRef
+                            |> Firebase.Database.Reference.child id
+                            |> Firebase.Database.Reference.child "completed"
+                            |> Firebase.Database.Reference.set (Json.Encode.bool isCompleted)
+                in
+                    ( model
+                    , Cmd.batch [ Task.attempt FirebaseResult setComplete ]
+                    )
 
-        EditingEntry id isEditing ->
-            let
-                updateEntry t =
-                    if t.id == id then
-                        { t | editing = isEditing }
-                    else
-                        t
+            CheckAll isCompleted ->
+                let
+                    setAllCompleted : Task Error ()
+                    setAllCompleted =
+                        rootRef
+                            |> Firebase.Database.Reference.update setEntriesCompleted
 
-                focus =
-                    Dom.focus ("todo-" ++ toString id)
-            in
-                { model | entries = List.map updateEntry model.entries }
-                    ! [ Task.attempt (\_ -> NoOp) focus ]
+                    setEntriesCompleted : Json.Encode.Value
+                    setEntriesCompleted =
+                        Json.Encode.object
+                            (List.map setEntryCompleted model.entries)
 
-        UpdateEntry id task ->
-            let
-                updateEntry t =
-                    if t.id == id then
-                        { t | description = task }
-                    else
-                        t
-            in
-                { model | entries = List.map updateEntry model.entries }
-                    ! []
+                    setEntryCompleted : Entry -> ( String, Json.Encode.Value )
+                    setEntryCompleted entry =
+                        ( entry.id
+                        , Json.Encode.object
+                            [ ( "completed", Json.Encode.bool isCompleted )
+                            ]
+                        )
+                in
+                    ( model
+                    , Cmd.batch [ Task.attempt FirebaseResult setAllCompleted ]
+                    )
 
-        Delete id ->
-            { model | entries = List.filter (\t -> t.id /= id) model.entries }
-                ! []
+            ChangeVisibility visibility ->
+                ( { model | visibility = visibility }
+                , Cmd.none
+                )
 
-        DeleteComplete ->
-            { model | entries = List.filter (not << .completed) model.entries }
-                ! []
+            FirebaseResult (Ok _) ->
+                ( model
+                , Cmd.none
+                )
 
-        Check id isCompleted ->
-            let
-                updateEntry t =
-                    if t.id == id then
-                        { t | completed = isCompleted }
-                    else
-                        t
-            in
-                { model | entries = List.map updateEntry model.entries }
-                    ! []
+            FirebaseResult (Err message) ->
+                let
+                    _ =
+                        Debug.log "FirebaseResult.Err" message
+                in
+                    ( model
+                    , Cmd.none
+                    )
 
-        CheckAll isCompleted ->
-            let
-                updateEntry t =
-                    { t | completed = isCompleted }
-            in
-                { model | entries = List.map updateEntry model.entries }
-                    ! []
+            FirebaseAuthResult (Ok _) ->
+                ( { model | signedIn = True }
+                , Cmd.none
+                )
 
-        ChangeVisibility visibility ->
-            { model | visibility = visibility }
-                ! []
+            FirebaseAuthResult (Err message) ->
+                let
+                    _ =
+                        Debug.log "FirebaseAuthResult.Err" message
+                in
+                    ( model
+                    , Cmd.none
+                    )
+
+            NoOp ->
+                ( model
+                , Cmd.none
+                )
 
 
 
@@ -208,8 +373,8 @@ view model =
         ]
         [ section
             [ class "todoapp" ]
-            [ lazy viewInput model.field
-            , lazy2 viewEntries model.visibility model.entries
+            [ lazy viewInput model.newTodoDescription
+            , lazy3 viewEntries model.visibility model.editingEntryId model.entries
             , lazy2 viewControls model.visibility model.entries
             ]
         , infoFooter
@@ -226,7 +391,6 @@ viewInput task =
             , placeholder "What needs to be done?"
             , autofocus True
             , value task
-            , name "newTodo"
             , onInput UpdateField
             , onEnter Add
             ]
@@ -239,19 +403,19 @@ onEnter msg =
     let
         isEnter code =
             if code == 13 then
-                Json.succeed msg
+                Json.Decode.succeed msg
             else
-                Json.fail "not ENTER"
+                Json.Decode.fail "not ENTER"
     in
-        on "keydown" (Json.andThen isEnter keyCode)
+        on "keydown" (Json.Decode.andThen isEnter keyCode)
 
 
 
 -- VIEW ALL ENTRIES
 
 
-viewEntries : String -> List Entry -> Html Msg
-viewEntries visibility entries =
+viewEntries : String -> Maybe String -> List Entry -> Html Msg
+viewEntries visibility editingEntryId entries =
     let
         isVisible todo =
             case visibility of
@@ -280,7 +444,6 @@ viewEntries visibility entries =
             [ input
                 [ class "toggle-all"
                 , type_ "checkbox"
-                , name "toggle"
                 , checked allCompleted
                 , onClick (CheckAll (not allCompleted))
                 ]
@@ -288,8 +451,8 @@ viewEntries visibility entries =
             , label
                 [ for "toggle-all" ]
                 [ text "Mark all as complete" ]
-            , Keyed.ul [ class "todo-list" ] <|
-                List.map viewKeyedEntry (List.filter isVisible entries)
+            , Html.Keyed.ul [ class "todo-list" ] <|
+                List.map (viewKeyedEntry editingEntryId) (List.filter isVisible entries)
             ]
 
 
@@ -297,15 +460,22 @@ viewEntries visibility entries =
 -- VIEW INDIVIDUAL ENTRIES
 
 
-viewKeyedEntry : Entry -> ( String, Html Msg )
-viewKeyedEntry todo =
-    ( toString todo.id, lazy viewEntry todo )
+viewKeyedEntry : Maybe String -> Entry -> ( String, Html Msg )
+viewKeyedEntry editingEntryId todo =
+    let
+        isEditing : Bool
+        isEditing =
+            (Just todo.id) == editingEntryId
+    in
+        ( todo.id
+        , lazy2 viewEntry isEditing todo
+        )
 
 
-viewEntry : Entry -> Html Msg
-viewEntry todo =
+viewEntry : Bool -> Entry -> Html Msg
+viewEntry isEditing todo =
     li
-        [ classList [ ( "completed", todo.completed ), ( "editing", todo.editing ) ] ]
+        [ classList [ ( "completed", todo.completed ), ( "editing", isEditing ) ] ]
         [ div
             [ class "view" ]
             [ input
@@ -316,7 +486,7 @@ viewEntry todo =
                 ]
                 []
             , label
-                [ onDoubleClick (EditingEntry todo.id True) ]
+                [ onDoubleClick (EditingEntry (Just todo.id)) ]
                 [ text todo.description ]
             , button
                 [ class "destroy"
@@ -327,11 +497,10 @@ viewEntry todo =
         , input
             [ class "edit"
             , value todo.description
-            , name "title"
-            , id ("todo-" ++ toString todo.id)
+            , id ("todo-" ++ todo.id)
             , onInput (UpdateEntry todo.id)
-            , onBlur (EditingEntry todo.id False)
-            , onEnter (EditingEntry todo.id False)
+            , onBlur (EditingEntry Nothing)
+            , onEnter (EditingEntry Nothing)
             ]
             []
         ]
@@ -414,6 +583,8 @@ infoFooter =
         [ p [] [ text "Double-click to edit a todo" ]
         , p []
             [ text "Written by "
+            , a [ href "https://github.com/mrozbarry" ] [ text "Alex Barry" ]
+            , text ", forked from work by "
             , a [ href "https://github.com/evancz" ] [ text "Evan Czaplicki" ]
             ]
         , p []

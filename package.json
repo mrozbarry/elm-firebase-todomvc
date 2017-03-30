@@ -1,0 +1,23 @@
+{
+  "name": "elm-firebase-todomvc",
+  "version": "1.0.0",
+  "main": "index.js",
+  "repository": {
+    "url": "git@github.com:mrozbarry/elm-firebase-todomvc.git",
+    "type": "git"
+  },
+  "author": "Alex <alex.barry@gmail.com>",
+  "license": "MIT",
+  "scripts": {
+    "build": "node_modules/.bin/elm-make Todo.elm --output=public/elm.js",
+    "start": "node_modules/firebase-tools/bin/firebase serve",
+    "postinstall": "node_modules/.bin/elm-github-install"
+  },
+  "devDependencies": {
+    "elm": "^0.18.0",
+    "elm-github-install": "^0.3.1",
+    "firebase-tools": "^3.5.0"
+  },
+  "dependencies": {
+  }
+}

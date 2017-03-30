@@ -1,0 +1,19 @@
+{
+  "rules": {
+    ".read": true,
+    "todo": {
+      "$id": {
+        ".write": "auth != null",
+        "description": {
+          ".validate": "newData.isString()"
+        },
+        "completed": {
+          ".validate": "newData.isBoolean()"
+        },
+        "$else": {
+          ".validate": false
+        }
+      }
+    }
+  }
+}
