@@ -173,6 +173,7 @@ update msg model =
                                 List.map
                                     (\( id, entry ) -> { entry | id = id })
                                     keyValueEntries
+
                             Nothing ->
                                 []
 
@@ -188,6 +189,7 @@ update msg model =
                             ( { model | entries = entries }
                             , Cmd.none
                             )
+
                         Err decodeMessage ->
                             let
                                 _ =
@@ -373,10 +375,15 @@ view model =
         ]
         [ section
             [ class "todoapp" ]
-            [ lazy viewInput model.newTodoDescription
-            , lazy3 viewEntries model.visibility model.editingEntryId model.entries
-            , lazy2 viewControls model.visibility model.entries
-            ]
+            ((if model.signedIn then
+                [ lazy viewInput model.newTodoDescription ]
+              else
+                []
+             )
+                ++ [ lazy viewEntries model
+                   , lazy3 viewControls model.visibility model.signedIn model.entries
+                   ]
+            )
         , infoFooter
         ]
 
@@ -414,11 +421,11 @@ onEnter msg =
 -- VIEW ALL ENTRIES
 
 
-viewEntries : String -> Maybe String -> List Entry -> Html Msg
-viewEntries visibility editingEntryId entries =
+viewEntries : Model -> Html Msg
+viewEntries model =
     let
         isVisible todo =
-            case visibility of
+            case model.visibility of
                 "Completed" ->
                     todo.completed
 
@@ -429,10 +436,10 @@ viewEntries visibility editingEntryId entries =
                     True
 
         allCompleted =
-            List.all .completed entries
+            List.all .completed model.entries
 
         cssVisibility =
-            if List.isEmpty entries then
+            if List.isEmpty model.entries then
                 "hidden"
             else
                 "visible"
@@ -446,13 +453,14 @@ viewEntries visibility editingEntryId entries =
                 , type_ "checkbox"
                 , checked allCompleted
                 , onClick (CheckAll (not allCompleted))
+                , disabled (not model.signedIn)
                 ]
                 []
             , label
                 [ for "toggle-all" ]
                 [ text "Mark all as complete" ]
             , Html.Keyed.ul [ class "todo-list" ] <|
-                List.map (viewKeyedEntry editingEntryId) (List.filter isVisible entries)
+                List.map (viewKeyedEntry model.signedIn model.editingEntryId) (List.filter isVisible model.entries)
             ]
 
 
@@ -460,58 +468,71 @@ viewEntries visibility editingEntryId entries =
 -- VIEW INDIVIDUAL ENTRIES
 
 
-viewKeyedEntry : Maybe String -> Entry -> ( String, Html Msg )
-viewKeyedEntry editingEntryId todo =
+viewKeyedEntry : Bool -> Maybe String -> Entry -> ( String, Html Msg )
+viewKeyedEntry signedIn editingEntryId todo =
     let
         isEditing : Bool
         isEditing =
             (Just todo.id) == editingEntryId
     in
         ( todo.id
-        , lazy2 viewEntry isEditing todo
+        , lazy3 viewEntry signedIn isEditing todo
         )
 
 
-viewEntry : Bool -> Entry -> Html Msg
-viewEntry isEditing todo =
-    li
-        [ classList [ ( "completed", todo.completed ), ( "editing", isEditing ) ] ]
-        [ div
-            [ class "view" ]
-            [ input
-                [ class "toggle"
-                , type_ "checkbox"
-                , checked todo.completed
-                , onClick (Check todo.id (not todo.completed))
+viewEntry : Bool -> Bool -> Entry -> Html Msg
+viewEntry signedIn isEditing todo =
+    case signedIn of
+        True ->
+            li
+                [ classList [ ( "completed", todo.completed ), ( "editing", isEditing ) ] ]
+                [ div
+                    [ class "view" ]
+                    [ input
+                        [ class "toggle"
+                        , type_ "checkbox"
+                        , checked todo.completed
+                        , onClick (Check todo.id (not todo.completed))
+                        ]
+                        []
+                    , label
+                        [ onDoubleClick (EditingEntry (Just todo.id)) ]
+                        [ text todo.description ]
+                    , button
+                        [ class "destroy"
+                        , onClick (Delete todo.id)
+                        ]
+                        []
+                    ]
+                , input
+                    [ class "edit"
+                    , value todo.description
+                    , id ("todo-" ++ todo.id)
+                    , onInput (UpdateEntry todo.id)
+                    , onBlur (EditingEntry Nothing)
+                    , onEnter (EditingEntry Nothing)
+                    ]
+                    []
                 ]
-                []
-            , label
-                [ onDoubleClick (EditingEntry (Just todo.id)) ]
-                [ text todo.description ]
-            , button
-                [ class "destroy"
-                , onClick (Delete todo.id)
+
+        False ->
+            li
+                [ classList [ ( "completed", todo.completed ) ] ]
+                [ div
+                    [ class "view" ]
+                    [ label
+                        []
+                        [ text todo.description ]
+                    ]
                 ]
-                []
-            ]
-        , input
-            [ class "edit"
-            , value todo.description
-            , id ("todo-" ++ todo.id)
-            , onInput (UpdateEntry todo.id)
-            , onBlur (EditingEntry Nothing)
-            , onEnter (EditingEntry Nothing)
-            ]
-            []
-        ]
 
 
 
 -- VIEW CONTROLS AND FOOTER
 
 
-viewControls : String -> List Entry -> Html Msg
-viewControls visibility entries =
+viewControls : String -> Bool -> List Entry -> Html Msg
+viewControls visibility signedIn entries =
     let
         entriesCompleted =
             List.length (List.filter .completed entries)
@@ -523,10 +544,15 @@ viewControls visibility entries =
             [ class "footer"
             , hidden (List.isEmpty entries)
             ]
-            [ lazy viewControlsCount entriesLeft
-            , lazy viewControlsFilters visibility
-            , lazy viewControlsClear entriesCompleted
-            ]
+            ([ lazy viewControlsCount entriesLeft
+             , lazy viewControlsFilters visibility
+             ]
+                ++ (if signedIn then
+                        [ lazy viewControlsClear entriesCompleted ]
+                    else
+                        []
+                   )
+            )
 
 
 viewControlsCount : Int -> Html Msg
