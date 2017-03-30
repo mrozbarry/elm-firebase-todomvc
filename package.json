@@ -11,6 +11,7 @@
   "scripts": {
     "build": "node_modules/.bin/elm-make Todo.elm --output=public/elm.js",
     "start": "node_modules/firebase-tools/bin/firebase serve",
+    "deploy": "node_modules/firebase-tools/bin/firebase deploy",
     "postinstall": "node_modules/.bin/elm-github-install"
   },
   "devDependencies": {
