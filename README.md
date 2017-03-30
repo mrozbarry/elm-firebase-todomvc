@@ -1,6 +1,6 @@
 # TodoMVC in Elm - https://elm-firebase-todomvc.firebaseapp.com/
 
-All of the Elm code lives in `Todo.elm` and relies on the [elm-lang/html][http://package.elm-lang.org/packages/elm-lang/html/latest] and [pairshaped/elm-firebase](https://github.com/pairshaped/elm-firebase) libraries.
+All of the Elm code lives in `Todo.elm` and relies on the [elm-lang/html](http://package.elm-lang.org/packages/elm-lang/html/latest) and [pairshaped/elm-firebase](https://github.com/pairshaped/elm-firebase) libraries.
 
 
 ## Build Instructions
